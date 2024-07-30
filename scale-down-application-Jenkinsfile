@@ -1,0 +1,440 @@
+/**
+  ************************************************************************************************************************
+  * Script Name : scale-down-application-Jenkinsfile
+  * Purpose : Utility to perform scale down function for applications mentioned below
+  *         # APP1 
+  *         # APP1 
+  *         # APP3
+  *         # APP4
+  *         # APP5
+  *         # APP6
+  * Author : Vivek Dubey(https://github.com/vivekdubeyvkd)
+  ************************************************************************************************************************
+**/
+
+/**
+    Try it out on your pre-prod or other lowers environments first before using it for production environments. 
+    You can make changes to the scripts as per your requirements and contribute back as well in case if the changes are generic.
+**/
+
+teamName = "myteam"
+label_val = "myspndsdu-${teamName}-${UUID.randomUUID().toString()}"
+container_name = "myspndsdu-${teamName}-${BUILD_NUMBER}"
+user_list = ['user1', 'user2']
+
+APP_LIST = []
+INPUT_ACTION_TYPE = ""
+TAG_NAME = ""
+APP_TO_PREPROD_EnvNameSpace_MAP = [:]
+APP_TO_REPO_MAP = [
+        "APP1" : "GitHubOrg1/GitHubRepo1",
+        "APP2" : "GitHubOrg2/GitHubRepo2",
+        "APP3" : "GitHubOrg3/GitHubRepo3",
+        "APP4" : "GitHubOrg4/GitHubRepo4",
+        "APP5" : "GitHubOrg5/GitHubRepo5",
+        "APP6" : "GitHubOrg6/GitHubRepo6"
+    ]
+// Below tokens needs to be configured on Jenkins Instance under Credentials for each application
+APP_TO_ARGO_TOKEN_MAP = [
+        "APP1" : "app1-pod-scaling-token",
+        "APP2" : "app2-pod-scaling-token",
+        "APP3" : "app3-pod-scaling-token",
+        "APP4" : "app4-pod-scaling-token",
+        "APP5" : "app5-pod-scaling-token",
+        "APP6" : "app6-pod-scaling-token"
+    ]
+
+def syncManifestChangesToArgoCD(){
+    if("${SYNC_TO_ARGO}" == "YES"){
+         if("${RUNTYPE}" == "submit"){
+              ARGO_SERVER_URL = "myargo.tool-k8s-prd.com:443"
+              for(appIndex = 0; appIndex < APP_LIST.size(); appIndex++){
+                  appName = APP_LIST[appIndex]
+                  appRepoOrgName = APP_TO_REPO_MAP[appName]
+                  appRepoName = appRepoOrgName.replaceAll(".*/","").replaceAll("-","_").replaceAll("\r", "").replaceAll("\n", "").trim()
+                  argoSyncTmpFile = "${appRepoName}.txt"
+                  if(fileExists("${WORKSPACE}/${argoSyncTmpFile}")){
+                      argoSyncBranchName = readFile("${WORKSPACE}/${argoSyncTmpFile}")
+                      envNameSpace = APP_TO_PREPROD_EnvNameSpace_MAP[appName]
+                      argoTokenCredId = APP_TO_ARGO_TOKEN_MAP[appName]
+                      withCredentials([string(credentialsId: "${argoTokenCredId}", variable: 'argoToken')]) {
+                         echo """
+                                   Syncing Manifest YAML changes for ${appName} in ${DEPLOYMENT_ENV_NAME}, more details as follows
+                                   ArgoCD server : ${ARGO_SERVER_URL}
+                                   envNameSpace : ${envNameSpace}
+                                   argoSyncBranchName : ${argoSyncBranchName}
+                         """
+                         sh """#!/bin/bash
+                             export argoSyncBranchName=\$(cat "${WORKSPACE}/${argoSyncTmpFile}"|tr -d '\n')
+                             curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/v1.7.8/argocd-linux-amd64
+                             chmod +x /usr/local/bin/argocd
+                             argocd --server "${ARGO_SERVER_URL}" app sync "${envNameSpace}" --auth-token "$argoToken" --prune --grpc-web --revision "\$argoSyncBranchName"
+                         """
+                      }
+                  } else {
+                      echo """
+                                Argo sync temp file ${argoSyncTmpFile} with argo sync branch name not found in workspace, so no action needed here .....
+                      """
+                  }
+             }
+        }else{
+             echo """
+                      As RUNTYPE is set to dryrun, so no action is required here !!
+             """             
+        }
+    }else{
+        echo """
+                 As SYNC_TO_ARGO is set to NO, so no action is required here !!
+        """
+    }
+} 
+
+def validateUserInput(){
+     if("${RUNTYPE}" == "select"){
+         error "Invalid input field RUNTYPE, kindly check and rerun ... exiting ...."
+     }else if("${DEPLOYMENT_ENV_NAME}" == "select"){
+         error "Invalid input field DEPLOYMENT_ENV_NAME, kindly check and rerun ... exiting ...."
+     }else if("${ACTION_TYPE}" == "select"){
+         error "Invalid input field ACTION_TYPE, kindly check and rerun ... exiting ...."
+     }else if("${IKS_REGION}" == "select"){
+         error "Invalid input field IKS_REGION, kindly check and rerun ... exiting ...."
+     }else if(! "${APPLICATION_DETAILS}"){
+         error "Invalid input field APPLICATION_DETAILS, kindly check and rerun ... exiting ...."
+     }else if(! "${RELEASE_VERSION}"){
+         if("${RUNTYPE}" == "submit"){
+             error "Invalid input field RELEASE_VERSION, kindly check and rerun ... exiting ...."
+         }else{
+             echo """
+                       Input field RELEASE_VERSION is not required for DryRun triggers !!
+             """
+         }
+     }else{
+         echo """
+                 All Inputs looks ok !!
+         """
+     }
+}
+
+def set_build_description(){
+    stage('Build Description'){
+        if("${RUNTYPE}" == "submit"){
+             currentBuild.description = "[${RUNTYPE}] [${DEPLOYMENT_ENV_NAME}] [${IKS_REGION}] [${ACTION_TYPE}] [${TAG_NAME}]"       
+        }else{
+             currentBuild.description = "[${RUNTYPE}] [${DEPLOYMENT_ENV_NAME}] [${IKS_REGION}] [${ACTION_TYPE}]"
+        } 
+    }
+}
+
+def archiveManifestFile(appName){
+    sh """#!/bin/bash
+        if [ -f "scripts/git_source/manifest.yaml" ]
+        then
+            cp scripts/git_source/manifest.yaml ${WORKSPACE}/${appName}_manifest.yaml
+        fi
+    """
+    archiveArtifacts allowEmptyArchive: true, artifacts: '*.yaml', followSymlinks: false
+}
+
+def updateManifestFile(repoOrgName){
+    withCredentials([usernamePassword(credentialsId: 'your_github_token_on_jenkins', passwordVariable: 'GPWD', usernameVariable: 'GUSR')]) {
+        if("${ACTION_TYPE}" == "scaleDown"){
+            sh """#!/bin/bash
+                cd scripts
+                chmod 755 ./pod-scale-up-down.sh
+                export TAG_NAME=${TAG_NAME}
+                export appRepoOrgName=${repoOrgName}
+                ./pod-scale-up-down.sh "${DEPLOYMENT_ENV_NAME}" "${repoOrgName}" "${IKS_REGION}" $GPWD "${INPUT_ACTION_TYPE}" "${RUNTYPE}"
+            """
+        }else{
+            echo """
+                      WIP for Scale Up operations ......
+            """
+        }
+    }
+}
+
+def setInputActionType() {
+    if("${ACTION_TYPE}" == "scaleDown"){
+        INPUT_ACTION_TYPE = "sd"
+    }else if("${ACTION_TYPE}" == "scaleUp"){
+        INPUT_ACTION_TYPE = "su"
+    }else{
+        error "Invalid ACTION_TYPE field, kindly check and try again .... exiting ...."
+    }  
+}
+
+def validateRunUser(){
+   stage("Validate Run User"){
+       wrap([$class: 'BuildUser']) { 
+           if(user_list.contains(env.BUILD_USER_ID)){
+               println("User is allowed to perform this action")
+           } else {
+               currentBuild.description = "You are not allowed to perform this action"
+               error "You are not allowed to perform this action, please check on same ..... exiting ..."
+           } 
+       } 
+   }
+}
+
+def clean(inputPath){
+    sh """#!/bin/bash
+        if [ -d "${inputPath}" -o -f "${inputPath}" ]
+        then
+           rm -rf ${inputPath}
+        fi
+    """
+}
+
+def clean_WS(){
+    clean('scripts')
+    clean('git_source')
+    sh """#!/bin/bash
+        #python3 -m pip install requests
+        python3 -m pip install ruamel-yaml
+        echo -e "\n"
+        apt-get update
+        apt-get install -y git curl
+        echo -e "\n"
+        which git        
+    """
+}
+
+pipeline {
+    agent {
+        kubernetes {
+            label "${label_val}"
+            defaultContainer "${container_name}"
+            yaml """
+                apiVersion: v1
+                kind: Pod
+                spec:
+                    containers:
+                    - name: "${container_name}"
+                      image: 'dockerhub.com/python:3.8.5-20.08.18'
+                      resources:
+                          requests:
+                              memory: 10Gi
+                      command:
+                      - cat
+                      tty: true
+            """
+        }
+    }
+    stages {
+        stage("Start") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            validateRunUser()
+                        }
+                    }
+                }
+            }
+        }
+        stage("Clean and Install") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            clean_WS()
+                        }
+                    }
+                }
+            }
+        }  
+        stage("Validate Input") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            set_build_description()
+                            validateUserInput()
+                            APP_LIST = (Set)"${APPLICATION_DETAILS}".split('\n')
+                        }
+                    }
+                }
+            }
+        }       
+        stage("Checkout Scripts") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            // you can clone/fork this https://github.com/vivekdubeyvkd/ARGO_SCALE_UP_SCALE_DOWN_ACTIONS repo and update it as per your requirement and use your updated repo in below line
+                            checkout changelog: false, poll: false, scm: [$class: 'GitSCM', branches: [[name: 'master']], extensions: [[$class: 'RelativeTargetDirectory', relativeTargetDir: 'scripts'], [$class: 'WipeWorkspace']], userRemoteConfigs: [[credentialsId: 'your_github_token_on_jenkins', url: 'https://github.com/yourGitHubOrg/yourGitHubRepo.git']]]
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage("Set ENV Vars") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            setInputActionType()
+                            TAG_NAME = "TAG_ScaleDown_${BUILD_NUMBER}-${RELEASE_VERSION}"
+                            APP_TO_PREPROD_EnvNameSpace_MAP = [
+                                   "APP1" : "my-app1-us${IKS_REGION}-${DEPLOYMENT_ENV_NAME}",
+                                   "APP2" : "my-app2-us${IKS_REGION}-${DEPLOYMENT_ENV_NAME}",
+                                   "APP3" : "my-app3-us${IKS_REGION}-${DEPLOYMENT_ENV_NAME}",
+                                   "APP4" : "my-app4-us${IKS_REGION}-${DEPLOYMENT_ENV_NAME}",
+                                   "APP5" : "my-app5-us${IKS_REGION}-${DEPLOYMENT_ENV_NAME}",
+                                   "APP6" : "my-app6-us${IKS_REGION}-${DEPLOYMENT_ENV_NAME}"
+                               ]
+                            echo """
+                                        APP_TO_PREPROD_EnvNameSpace_MAP : ${APP_TO_PREPROD_EnvNameSpace_MAP}
+                            """                            
+                        }
+                    }
+                }
+            }
+        }
+        stage("Update Manifest File for APP1") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            if(APP_LIST.contains("APP1")){
+                                appRepoName = APP_TO_REPO_MAP["APP1"]
+                                updateManifestFile(appRepoName)
+                                archiveManifestFile("APP1")
+                            }else{
+                                echo """
+                                        No action needed as APP1 is not in input APPLICATION_DETAILS !!
+                                """
+                            }    
+                        }
+                    }
+                }
+            }
+        }        
+        stage("Update Manifest File for APP2") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            if(APP_LIST.contains("APP2")){
+                                appRepoName = APP_TO_REPO_MAP["APP2"]
+                                updateManifestFile(appRepoName)
+                                archiveManifestFile("APP2")
+                            }else{
+                                echo """
+                                        No action needed as APP2 is not in input APPLICATION_DETAILS !!
+                                """
+                            }    
+                        }
+                    }
+                }
+            }
+        }
+        stage("Update Manifest File for APP3") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            if(APP_LIST.contains("APP3")){
+                                appRepoName = APP_TO_REPO_MAP["APP3"]
+                                updateManifestFile(appRepoName)
+                                archiveManifestFile("APP3")
+                            }else{
+                                echo """
+                                        No action needed as APP3 is not in input APPLICATION_DETAILS !!
+                                """
+                            }    
+                        }
+                    }
+                }
+            }
+        }
+        stage("Update Manifest File for APP4") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            if(APP_LIST.contains("APP4")){
+                                appRepoName = APP_TO_REPO_MAP["APP4"]
+                                updateManifestFile(appRepoName)
+                                archiveManifestFile("APP4")
+                            }else{
+                                echo """
+                                        No action needed as APP4 is not in input APPLICATION_DETAILS !!
+                                """
+                            }    
+                        }
+                    }
+                }
+            }
+        }        
+        stage("Update Manifest File for APP5") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            if(APP_LIST.contains("APP5")){
+                                appRepoName = APP_TO_REPO_MAP["APP5"]
+                                updateManifestFile(appRepoName)
+                                archiveManifestFile("APP5")
+                            }else{
+                                echo """
+                                        No action needed as APP5 is not in input APPLICATION_DETAILS !!
+                                """
+                            }    
+                        }
+                    }
+                }
+            }
+        }
+         stage("Update Manifest File for APP6") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            if(APP_LIST.contains("APP6")){
+                                appRepoName = APP_TO_REPO_MAP["APP6"]
+                                updateManifestFile(appRepoName)
+                                archiveManifestFile("APP6")
+                            }else{
+                                echo """
+                                        No action needed as APP6 is not in input APPLICATION_DETAILS !!
+                                """
+                            }    
+                        }
+                    }
+                }
+            }
+        }
+        stage("Sync to Argo CD") {
+            steps {
+                script {
+                    timestamps {
+                        container(container_name) {
+                            syncManifestChangesToArgoCD()
+                        }
+                    }
+                }
+            }
+        } 
+        
+   
+    }
+    
+    post {
+        always {
+            println("always")
+            set_build_description()
+        }
+        failure {
+            script {
+                echo "Failure"
+            }
+        }
+        success {
+            script {
+                echo "Success"
+            }
+        }
+    }
+}
